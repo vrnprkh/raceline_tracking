@@ -1,136 +1,159 @@
 import numpy as np
 from numpy.typing import ArrayLike
 
-# REMOVE PLT debug
-from simulator import RaceTrack, plt
-
-# state = [x, y, steering_angle, velocity, heading]
-# paramters = self.parameters = np.array([
-        #     self.wheelbase, # Car Wheelbase 0
-        #     -self.max_steering_angle, # x3 1 
-        #     self.min_velocity, # x4 2
-        #     -np.pi, # x5 3
-        #     self.max_steering_angle, 4
-        #     self.max_velocity, 5
-        #     np.pi, 6
-        #     -self.max_steering_vel, # u1 7
-        #     -self.max_acceleration, # u2 8
-        #     self.max_steering_vel, 9 
-        #     self.max_acceleration 10
-        # ])
-
-
+from simulator import RaceTrack
 
 
 error_v_sum = 0
 error_phi_sum = 0
 
-last_error_v = None
+last_error_v = 0 
 last_error_phi = 0
 dt = 0.1
-def lower_controller(
-    state : ArrayLike, desired : ArrayLike, parameters : ArrayLike
-) -> ArrayLike:
-    global error_v_sum
-    global error_phi_sum
-    global last_error_v
-    global last_error_phi
-    # [steer angle, velocity]
-    assert(desired.shape == (2,))
+def lower_controller(state: ArrayLike, desired: ArrayLike, parameters: ArrayLike) -> ArrayLike:
+    global error_v_sum, error_phi_sum, last_error_v, last_error_phi
+    assert desired.shape == (2,)
 
-    # differnce signals 
+
+    Kp_v = 200
+    Ki_v = 0
+    Kd_v = 0
+
+    Kp_s = 10.0
+    Ki_s = 0
+    Kd_s = 2.0
+
+
     error_v = desired[1] - state[3]
-    error_phi = desired[0] - state[2]
-
-    # accel
-    # P  
-    K_p_accel = 2
-    desired_accel_p = K_p_accel * error_v 
-    # I
-    K_i_accel = 1
     error_v_sum += dt * error_v
-    desired_accel_i = K_i_accel * error_v_sum
-    # D
-    K_d_accel = 0.1
-    desired_accel_d = 0
-    if last_error_v is not None:
-        desired_accel_d = K_d_accel * (error_v - last_error_v) / dt
+
+    accel_cmd = Kp_v * error_v + Ki_v * error_v_sum + Kd_v * (error_v - last_error_v)
+    accel_cmd = np.clip(accel_cmd, parameters[8], parameters[10])
+
     last_error_v = error_v
 
-    print(desired_accel_p, desired_accel_i, desired_accel_d)
-
-    desired_accel = np.clip(
-        desired_accel_p + desired_accel_i + desired_accel_d, 
-        parameters[8], 
-        parameters[10])
-    # steering  
-    # P
-    K_p_steering = 10
-    desired_steering_p = K_p_steering * error_phi
-
-    # I
-    K_i_steering = 1
+    error_phi = desired[0] - state[2]
     error_phi_sum += dt * error_phi
-    desired_steering_i = K_i_steering * error_phi_sum
 
+    steer_cmd = Kp_s * error_phi + Ki_s * error_phi_sum + Kd_s * (error_phi - last_error_phi)
+    steer_cmd = np.clip(steer_cmd, parameters[7], parameters[9])
 
-    # D
-    K_d_steering = 1
-    desired_steering_d = K_d_steering * (error_phi - last_error_phi) / dt
     last_error_phi = error_phi
 
-    desired_steering = np.clip(
-        desired_steering_p + desired_steering_i + desired_steering_d,
-        parameters[7],
-        parameters[9]
-    )
+    return np.array([steer_cmd, accel_cmd])
 
-    return np.array([desired_steering, desired_accel]).T
 
 
 # global state
 i = 0 # current index
-# constants
-distance_threshold = 20
 
-def controller(
-    state : ArrayLike, parameters : ArrayLike, racetrack : RaceTrack
-) -> ArrayLike:
+def reset_globals():
+    global i, error_v_sum, error_phi_sum, last_error_v, last_error_phi
+    i = 0
+    error_v_sum = 0
+    error_phi_sum = 0
+
+    last_error_v = 0
+    last_error_phi = 0
+
+
+
+def closest_point_on_segment(rx, ry, px, py, sx, sy):
+    vx = px - rx
+    vy = py - ry
+    wx = sx - rx
+    wy = sy - ry
+    segment_len_sq = vx*vx + vy*vy
+    if segment_len_sq == 0:
+        return rx, ry
+    t = (wx*vx + wy*vy) / segment_len_sq
+    t = max(0, min(1, t))
+    cx = rx + t * vx
+    cy = ry + t * vy
+    return cx, cy
+
+def controller(state: ArrayLike, parameters: ArrayLike, racetrack: RaceTrack) -> ArrayLike:
     global i
-    # velocity
 
-    # compute desired angle
-    sx = state[0]
-    sy = state[1]
-    currentHeading = state[4] 
-    rx, ry = racetrack.centerline[i]
-    while (sx - rx) ** 2 + (sy - ry) ** 2 <= distance_threshold ** 2:
-        i = (i + 1) % len(racetrack.centerline) 
-        rx, ry = racetrack.centerline[i]
+    sx, sy = state[0], state[1]
+    heading = state[4]
 
-    plt.plot([rx], [ry], 'o')
+    points = racetrack.raceline
+    lwb = parameters[0]
 
+    # find lookahead
+    distance_threshold = 18
+    rx, ry = points[i]
+    
+    while (sx - rx)**2 + (sy - ry)**2 <= distance_threshold**2:
+        i = (i + 1) % len(points)
+        rx, ry = points[i]
+    
+    rx, ry = closest_point_on_segment(rx, ry, points[i - 1][0], points[i - 1][1], sx, sy)
     dx = rx - sx
     dy = ry - sy
 
-    # pure pursuit
 
-    lwb = parameters[0]
-    alpha = np.arctan2((ry - sy), (rx - sx)) - currentHeading
+    # angle desired pure pursuit
+    alpha = np.arctan2(dy, dx) - heading
+    lookahead_dist = np.hypot(dx, dy)
+    lookahead_dist = max(3.0, lookahead_dist)
 
-    distance_to_target = np.sqrt(dx**2 + dy**2)
-    lookahead = max(lwb, distance_to_target)
-    
-    desired_angle = np.arctan2(2 * lwb * np.sin(alpha), lookahead)
+    desired_angle = np.arctan2(2 * lwb * np.sin(alpha), lookahead_dist)
     desired_angle = np.clip(desired_angle, parameters[1], parameters[4])
+    
 
-    max_v_prop = 0.5
+    max_curv = 0.0
+
+    # number of future segments to scan for curvature
+    N = 43
+
+    spacing = 3
+    backwardsOffset = 1
+    for k in range(-backwardsOffset, N - backwardsOffset):
+
+        p1 = np.array(points[(i + k) % len(points)])
+        p2 = np.array(points[(i + k + spacing) % len(points)])
+        p3 = np.array(points[(i + k + spacing * 2) % len(points)])
+        # distances between points
+        a = np.linalg.norm(p2 - p1)
+        b = np.linalg.norm(p3 - p2)
+        c = np.linalg.norm(p3 - p1)
+
+        # prevent numerical issues
+        if a < 1e-4 or b < 1e-4 or c < 1e-4:
+            continue
+
+        s = 0.5 * (a + b + c)
+        area = max(1e-6, np.sqrt(max(0, s*(s-a)*(s-b)*(s-c))))
+
+        curvature = 4 * area / (a*b*c)
+        # importance scaling
+        scaling = 1 - ( k + backwardsOffset + 1 ) / N
+        curvature = scaling * curvature
+        max_curv = max(max_curv, curvature)
+
+    curvature = max_curv
+
+
+    a_lat_max = 60
+    if curvature < 1e-4:
+        v_curve = parameters[5]   
+    else:
+        v_curve = np.sqrt(a_lat_max / curvature)
+
+    max_v_prop = 1
     min_target_prop = 0.3
     angle_prop =  np.abs(desired_angle) / parameters[4]
     angle_multiplier = 10
     offset = 0
     power = 3
-    desired_velocity = parameters[5] * max(
+    temp_v = parameters[5] * max(
         min_target_prop, 
         max_v_prop * (1.0 - (angle_multiplier * angle_prop + offset) ** power + offset ** power))
-    return np.array([desired_angle, desired_velocity]).T
+
+    # Clip using car physical limits
+    desired_velocity = np.clip(min(v_curve, temp_v), parameters[2], parameters[5])
+
+    return np.array([desired_angle, desired_velocity])
+
